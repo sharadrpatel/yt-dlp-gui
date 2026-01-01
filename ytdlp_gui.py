@@ -1,17 +1,25 @@
 # ytdlp_gui.py
 # Feature-rich yt-dlp GUI for macOS (PySide6 + yt-dlp API)
 #
-# Setup:
+# Setup (dev):
 #   brew install ffmpeg
-#   python3 -m pip install -U yt-dlp PySide6
+#   python3 -m pip install -U yt-dlp PySide6 pyinstaller
 #
-# Run:
-#   python3 ytdlp_gui.py
+# Bundled ffmpeg/ffprobe support (Option 2A/2B):
+# - If you bundle ffmpeg + ffprobe into the .app (Contents/MacOS), this app will use them automatically.
+# - In dev mode, it will fall back to system ffmpeg if available.
+#
+# Build (bundling ffmpeg + ffprobe):
+#   pyinstaller --windowed --name "yt-dlp-gui" --noconfirm \
+#     --add-binary "vendor/ffmpeg/ffmpeg:." \
+#     --add-binary "vendor/ffmpeg/ffprobe:." \
+#     ytdlp_gui.py
 
 import os
 import re
 import sys
 import time
+import shutil
 import threading
 from dataclasses import dataclass
 
@@ -20,7 +28,7 @@ from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QTextEdit, QPushButton, QFileDialog, QComboBox, QCheckBox,
-    QProgressBar, QListWidget, QListWidgetItem, QMessageBox, QGroupBox, QSpinBox
+    QProgressBar, QListWidget, QListWidgetItem, QMessageBox, QGroupBox
 )
 
 import yt_dlp
@@ -60,6 +68,39 @@ def parse_rate_limit(s: str) -> int | None:
     unit = (m.group(2) or "").upper()
     mult = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3}.get(unit, 1)
     return int(val * mult)
+
+
+def bundled_ffmpeg_dir() -> str | None:
+    """
+    If packaged (PyInstaller), returns the directory containing bundled ffmpeg/ffprobe.
+    If running from source, returns None.
+
+    Expected bundled locations:
+      .../YourApp.app/Contents/MacOS/ffmpeg
+      .../YourApp.app/Contents/MacOS/ffprobe
+    """
+    exe_dir = os.path.dirname(sys.executable)  # .../.app/Contents/MacOS
+    ffmpeg_path = os.path.join(exe_dir, "ffmpeg")
+    ffprobe_path = os.path.join(exe_dir, "ffprobe")
+
+    if os.path.exists(ffmpeg_path) and os.access(ffmpeg_path, os.X_OK):
+        # ffprobe is optional, but recommended to bundle as well
+        if os.path.exists(ffprobe_path) and os.access(ffprobe_path, os.X_OK):
+            return exe_dir
+        # still usable with ffmpeg alone:
+        return exe_dir
+
+    return None
+
+
+def best_effort_system_ffmpeg_dir() -> str | None:
+    """
+    Dev fallback: if system ffmpeg exists, return its directory (for yt-dlp 'ffmpeg_location').
+    """
+    sys_ffmpeg = shutil.which("ffmpeg")
+    if not sys_ffmpeg:
+        return None
+    return os.path.dirname(sys_ffmpeg)
 
 
 # -----------------------------
@@ -281,14 +322,14 @@ class MainWindow(QMainWindow):
         sub_wrap.setLayout(sub_row)
         grid.addWidget(sub_wrap, 3, 1, 1, 3)
 
-        # Metadata / thumbnail / chapters file
+        # Metadata / thumbnail / info json
         self.chk_metadata = QCheckBox("Embed metadata")
         self.chk_thumbnail = QCheckBox("Embed thumbnail")
-        self.chk_chapters = QCheckBox("Write info JSON (chapters/metadata)")
+        self.chk_infojson = QCheckBox("Write info JSON (chapters/metadata)")
         extras_row = QHBoxLayout()
         extras_row.addWidget(self.chk_metadata)
         extras_row.addWidget(self.chk_thumbnail)
-        extras_row.addWidget(self.chk_chapters)
+        extras_row.addWidget(self.chk_infojson)
         extras_wrap = QWidget()
         extras_wrap.setLayout(extras_row)
         grid.addWidget(extras_wrap, 4, 1, 1, 3)
@@ -365,7 +406,6 @@ class MainWindow(QMainWindow):
     # UI helpers
     # -----------------------------
     def append_log(self, text: str):
-        # Fix for your error: QTextCursor is in PySide6.QtGui (not QtCore.Qt)
         self.log.moveCursor(QTextCursor.End)
         self.log.insertPlainText(text)
         self.log.moveCursor(QTextCursor.End)
@@ -426,7 +466,6 @@ class MainWindow(QMainWindow):
         self.queue_list.clear()
 
     def list_formats_for_first_url(self):
-        # Prefer URL in input; else first in queue
         urls = safe_strip_lines(self.url_box.toPlainText())
         if urls:
             url = urls[0]
@@ -510,6 +549,15 @@ class MainWindow(QMainWindow):
             "no_warnings": True,
         }
 
+        # ffmpeg/ffprobe location (bundled preferred)
+        ffdir = bundled_ffmpeg_dir()
+        if ffdir:
+            opts["ffmpeg_location"] = ffdir
+        else:
+            sys_ffdir = best_effort_system_ffmpeg_dir()
+            if sys_ffdir:
+                opts["ffmpeg_location"] = sys_ffdir
+
         # Rate limit
         rl = parse_rate_limit(self.rate_limit.text())
         if rl is not None:
@@ -543,7 +591,7 @@ class MainWindow(QMainWindow):
         if self.chk_thumbnail.isChecked():
             opts["writethumbnail"] = True
             opts["embedthumbnail"] = True
-        if self.chk_chapters.isChecked():
+        if self.chk_infojson.isChecked():
             opts["writeinfojson"] = True
 
         # Audio extraction
